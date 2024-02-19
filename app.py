@@ -2,7 +2,7 @@ import sys
 import os
 import json
 from PyQt6.QtWidgets import QApplication, QGridLayout, QHeaderView, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit, QFileDialog, QTabWidget, QTableWidget, QSizePolicy, QTableWidgetItem
-from PyQt6.QtCore import pyqtSignal, Qt, QSize
+from PyQt6.QtCore import pyqtSignal, Qt, QSize, QObject, QTimer, QThread
 from PyQt6 import QtGui
 import pyqtgraph as pg
 from reader import get_hand_list, get_text_files, get_player_stats
@@ -14,9 +14,18 @@ ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
 HAND_TEXT = []
 HANDS = []
-PLAYER_STATS = {}
+PLAYER_STATS = {
+        "vpip": 0.,
+        "best_hand": "",
+        "bb/100": 0.,
+        "af": 100.,
+        "cprofit": 0.,
+        "earliest_hand": "",
+        "pfr": 0.
+    }
 USER = ""
 DIRPATHS = []
+DATA_UPDATE_RATE = 5000 # how many ms between data updates
 
 def update_config_data():
     global USER, DIRPATHS
@@ -25,18 +34,23 @@ def update_config_data():
         DIRPATHS = config['handHistoryDirs']
         USER = config['user']
 
-def update_hand_details():
-    global HAND_TEXT, HANDS, PLAYER_STATS
-    HAND_TEXT = get_text_files(DIRPATHS)
-    HANDS = get_hand_list(HAND_TEXT, USER)
-    PLAYER_STATS = get_player_stats(HANDS)
+class Worker(QObject):
+    finished = pyqtSignal()
+
+    def run(self):
+        """Long-running task."""
+        global HAND_TEXT, HANDS, PLAYER_STATS
+        update_config_data()
+        HAND_TEXT = get_text_files(DIRPATHS)
+        HANDS = get_hand_list(HAND_TEXT, USER)
+        PLAYER_STATS = get_player_stats(HANDS)
+        self.finished.emit()
 
 class Config(QWidget):
-    configurationCompleted = pyqtSignal()
-
-    def __init__(self):
+    def __init__(self, parent):
         super().__init__()
         self.configPath = './config/config.json'
+        self.parent = parent
         self.initUI()
     
     def initUI(self):
@@ -91,177 +105,240 @@ class Config(QWidget):
             config = {'handHistoryDirs': [dirPath], "user": user}
             with open(self.configPath, 'w') as file:
                 json.dump(config, file)
-            self.configurationCompleted.emit()  # Emit signal after saving configuration
             self.close()
+            self.parent.onTimerTimeout()
 
 class Main(QWidget):
     def __init__(self):
         super().__init__()
-
-    def updateAndShow(self):
-        update_config_data()
-        update_hand_details()
         self.initUI()
-        self.show()
+        self.setupWorkerAndThread()
+        self.setupTimer()
+
+        # Manually trigger the first data update
+        self.onTimerTimeout()
+
+    def setupWorkerAndThread(self):
+        self.thread = QThread()
+        self.worker = Worker()
+        self.worker.moveToThread(self.thread)
+        
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self.thread.quit)
+        self.thread.finished.connect(self.updateTabs)
+
+    def setupTimer(self):
+        self.timer = QTimer(self)
+        self.timer.setInterval(DATA_UPDATE_RATE)
+        self.timer.timeout.connect(self.onTimerTimeout)
+        self.timer.start()
+
+    def onTimerTimeout(self):
+        if not self.thread.isRunning():
+            self.thread.start()
 
     def initUI(self):
         self.setWindowTitle('Ace Analytics')
-        self.setGeometry(100, 100, 1000, 800)  # Updated window size
+        self.setGeometry(100, 100, 1000, 800)
 
-        # Main layout is horizontal: tabs on the left, content on the right
-        mainLayout = QHBoxLayout()
-        self.setLayout(mainLayout)
+        mainLayout = QHBoxLayout(self)
         
-        # Tabs for different sections
+        self.dashboard = Dashboard()
+        self.basic = BasicStats()
+        self.hands = HandHist()
+
         tabWidget = QTabWidget()
-        tabWidget.addTab(Dashboard(), "Dashboard")
-        tabWidget.addTab(BasicStats(), "Basic Statistics")
-        tabWidget.addTab(QLabel("Advanced Statistics"), "Advanced Statistics")
-        tabWidget.addTab(HandHist(), "Hands")
-        tabWidget.addTab(QLabel("Players"), "Players")
-        tabWidget.addTab(QLabel("Charts"), "Charts")
-        tabWidget.addTab(QLabel("Settings"), "Settings")
+        sections = [
+            (self.dashboard, "Dashboard"),
+            (self.basic, "Basic Statistics"),
+            (QLabel("Advanced Statistics"), "Advanced Statistics"),
+            (self.hands, "Hands"),
+            (QLabel("Players"), "Players"),
+            (QLabel("Charts"), "Charts"),
+            (QLabel("Settings"), "Settings"),
+        ]
         
-        # Add the tab widget to the main layout
+        for section, title in sections:
+            tabWidget.addTab(section, title)
+        
         mainLayout.addWidget(tabWidget)
 
+    def updateTabs(self):
+        self.dashboard.updateData()
+        self.basic.updateData()
+        self.hands.updateData()
+
+    def customShow(self):
+        self.show()
+        if not isConfigValid():
+            self.c = Config(self)
+            self.c.show()
+             
 class Dashboard(QWidget):
     def __init__(self):
         super().__init__()
-        update_config_data()
-        update_hand_details()
         self.init_dashboard()
 
     def init_dashboard(self):
         layout = QVBoxLayout()
         layout.setSpacing(0)
-
         layout.addStretch()
 
-        welcomeLabel = QLabel(f"<h1 style=\"font-weight: normal;\">Welcome, <b>{USER}</b></h1>")
-        welcomeLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(welcomeLabel)
+        self.user = USER
+        welcomeStr = f"<h1 style=\"font-weight: normal;\">Welcome, <b>{self.user}</b></h1>" if self.user else "<h1 style=\"font-weight: normal;\">Welcome!</h1>"
+        self.welcomeLabel = QLabel(welcomeStr)
+        self.welcomeLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.welcomeLabel)
 
-        if len(HANDS) == 0:
-            warningLabel = QLabel(f"<h2 style=\"color: rgb(200, 0, 0); font-weight: normal;\">Warning: No hand data was found in <b>{DIRPATHS}</b></h2>")
-            warningLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(warningLabel)
+        if not HANDS:
+            self.warningLabel = QLabel(f"<h2 style=\"color: rgb(200, 0, 0); font-weight: normal;\">Warning: No hand data was found in <b>{DIRPATHS}</b></h2>")
+            self.warningLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(self.warningLabel)
+
+        self.numHands = len(HANDS)
+        self.handsPlayedLabel = QLabel(f"<h2 style=\"font-weight: normal;\">You've played <b>{len(HANDS)}</b> hands so far</h2>")
+        self.handsPlayedLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.handsPlayedLabel)
+
+        profit = PLAYER_STATS["cprofit"]
+
+        if profit >= 0:
+            self.profitLabel = QLabel(f"<h2 style=\"font-weight: normal;\">You've made <b>${profit}</b> so far</h2>")
         else:
-            handsPlayedLabel = QLabel(f"<h2 style=\"font-weight: normal;\">You've played <b>{len(HANDS)}</b> hands so far</h2>")
-            handsPlayedLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(handsPlayedLabel)
+            self.profitLabel = QLabel(f"<h2 style=\"font-weight: normal;\">You've lost <b style=\"color: rgb(200, 0, 0);\">-${abs(profit)}</b> so far</h2>")
+        self.profitLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.profitLabel)
 
-            profit = PLAYER_STATS["cprofit"]
+        self.dateLabel = QLabel(f"<h2 style=\"font-weight: normal;\">Playing since <b>{str(PLAYER_STATS['earliest_hand']).split(' ')[0]}</b></h2>")
+        self.dateLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.dateLabel)
 
-            if profit >= 0:
-                profitLabel = QLabel(f"<h2 style=\"font-weight: normal;\">You've made <b>${profit}</b> so far</h2>")
-            else:
-                profitLabel = QLabel(f"<h2 style=\"font-weight: normal;\">You've lost <b style=\"color: rgb(200, 0, 0);\">-${abs(profit)}</b> so far</h2>")
-            profitLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(profitLabel)
+        graphLayout = QHBoxLayout()
+        self.graphWidget = pg.PlotWidget()
+        self.graphWidget.setBackground("w")
 
-            dateLabel = QLabel(f"<h2 style=\"font-weight: normal;\">Playing since <b>{str(PLAYER_STATS['earliest_hand']).split(' ')[0]}</b></h2>")
-            dateLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(dateLabel)
+        self.graphWidget.setMinimumWidth(600)
+        self.graphWidget.setMaximumWidth(800)
 
-            if HANDS:
-                graphLayout = QHBoxLayout()
-                graphWidget = pg.PlotWidget()
-                graphWidget.setBackground("w")
+        graphLayout.addStretch()
+        graphLayout.addWidget(self.graphWidget)
+        graphLayout.addStretch()
 
-                graphWidget.setMinimumWidth(600)
-                graphWidget.setMaximumWidth(800)
+        x = list(range(1, len(HANDS) + 1))
+        y = [0]
+        for i, hand in enumerate(HANDS, start=1):
+            y.append(y[-1] + hand.profit)
 
-                graphLayout.addStretch()
-                graphLayout.addWidget(graphWidget)
-                graphLayout.addStretch()
+        self.graphStyles = {"color": "black", "font-size": "18px"}
+        self.graphWidget.setLabel("left", "Cumulative Profit ($)", **self.graphStyles)
+        self.graphWidget.setLabel("bottom", "Hands", **self.graphStyles)
+        self.graphWidget.plot(x, y[1:], pen='r', name="Cumulative Profit")
+        self.ref_pen = pg.mkPen(color=(0, 0, 0), width=1, style=Qt.PenStyle.DotLine)
+        self.graphWidget.plot(x, [0 for i in range(len(y[1:]))], pen=self.ref_pen)
 
-                x = list(range(1, len(HANDS) + 1))
-                y = [0]
-                for i, hand in enumerate(HANDS, start=1):
-                    y.append(y[-1] + hand.profit)
+        layout.addLayout(graphLayout)
 
-                styles = {"color": "black", "font-size": "18px"}
-                graphWidget.setLabel("left", "Cumulative Profit ($)", **styles)
-                graphWidget.setLabel("bottom", "Hands", **styles)
-                graphWidget.plot(x, y[1:], pen='r', name="Cumulative Profit")
-                ref_pen = pg.mkPen(color=(0, 0, 0), width=1, style=Qt.PenStyle.DotLine)
-                graphWidget.plot(x, [0 for i in range(len(y[1:]))], pen=ref_pen)
-
-                layout.addLayout(graphLayout)
-
-        self.setLayout(layout)
         layout.addStretch()
         self.setLayout(layout)
+
+    def updateData(self):
+        if USER != self.user:
+            self.user = USER
+            welcomeStr = f"<h1 style=\"font-weight: normal;\">Welcome, <b>{self.user}</b></h1>" if self.user else "<h1 style=\"font-weight: normal;\">Welcome!</h1>"
+            self.welcomeLabel.setText(welcomeStr)
+
+        if len(HANDS) != self.numHands:
+            prevHands = self.numHands
+            self.numHands = len(HANDS)
+            if prevHands == 0:
+                self.warningLabel.deleteLater()
+                self.warningLabel = None
+                self.handsPlayedLabel.setText(f"<h2 style=\"font-weight: normal;\">You've played <b>{len(HANDS)}</b> hands so far</h2>")
+            
+            self.handsPlayedLabel.setText(f"<h2 style=\"font-weight: normal;\">You've played <b>{len(HANDS)}</b> hands so far</h2>")
+            profit = PLAYER_STATS["cprofit"]
+            if profit >= 0: self.profitLabel.setText(f"<h2 style=\"font-weight: normal;\">You've made <b>${profit}</b> so far</h2>")
+            else: self.profitLabel.setText(f"<h2 style=\"font-weight: normal;\">You've lost <b style=\"color: rgb(200, 0, 0);\">-${abs(profit)}</b> so far</h2>")
+            self.graphWidget.clear()
+            x = list(range(1, len(HANDS) + 1))
+            y = [0]
+            for i, hand in enumerate(HANDS, start=1):
+                y.append(y[-1] + hand.profit)
+            self.graphWidget.setLabel("left", "Cumulative Profit ($)", **self.graphStyles)
+            self.graphWidget.setLabel("bottom", "Hands", **self.graphStyles)
+            self.graphWidget.plot(x, y[1:], pen='r', name="Cumulative Profit")
+            self.graphWidget.plot(x, [0 for i in range(len(y[1:]))], pen=self.ref_pen)
 
 class BasicStats(QWidget):
     def __init__(self):
         super().__init__()
-        update_config_data()
-        update_hand_details()
+        self.value_labels = {}
         self.init_dashboard()
 
     def init_dashboard(self):
         grid_layout = QGridLayout()
         grid_layout.setSpacing(0)
         
-        grid_layout.setColumnStretch(0, 1)  # First column stretch factor set to 2
+        grid_layout.setColumnStretch(0, 1)
         grid_layout.setColumnStretch(1, 5)
 
-        # Helper function to create a title label
         def create_title_label(text):
             label = QLabel(f'<h3><b>{text}</b></h3>')
-            label.setObjectName("title")
             label.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
             return label
 
-        # Helper function to create a value label
-        def create_value_label(text):
+        def create_value_label(name, text):
             label = QLabel(f'<h3 style="font-weight: normal;">{text}</h3>')
-            label.setObjectName("value")
             label.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
+            self.value_labels[name] = label
             return label
 
-        # Add widgets to the grid layout
         labels = [
-            ("VPIP:", f'{PLAYER_STATS["vpip"] * 100}%'),
-            ("PFR:", f'{PLAYER_STATS["pfr"] * 100}%'),
-            ("AF:", PLAYER_STATS['af']),
-            ("BB/100:", PLAYER_STATS['bb/100']),
-            ("$/100 Hands:", format_profit_value(self.calculate_dollar_per_100_hands())),
-            ("Cumulative Profit:", f"${PLAYER_STATS['cprofit']}" if PLAYER_STATS['cprofit'] >= 0 else f"-${abs(PLAYER_STATS['cprofit'])}"),
-            ("Best Hand:", PLAYER_STATS['best_hand']),
+            ("VPIP", "vpip"),
+            ("PFR", "pfr"),
+            ("AF", "af"),
+            ("BB/100", "bb/100"),
+            ("$/100 Hands", "dollar_per_100_hands"),
+            ("Cumulative Profit", "cprofit"),
+            ("Best Hand", "best_hand"),
         ]
 
-        for i, (title, value) in enumerate(labels):
+        for i, (title, name) in enumerate(labels):
             grid_layout.addWidget(create_title_label(title), i, 0)
-            grid_layout.addWidget(create_value_label(str(value)), i, 1)
+            grid_layout.addWidget(create_value_label(name, ""), i, 1)
 
-        # This line will push all the content to the top and left.
         grid_layout.setRowStretch(len(labels), 1)
-
-        # Set the layout to the grid layout
         self.setLayout(grid_layout)
+        self.updateData()
 
     def calculate_dollar_per_100_hands(self):
         if len(HANDS) > 0:
             return round(PLAYER_STATS['cprofit'] / len(HANDS) * 100, 2)
         return 0.0
 
+    def updateData(self):
+        self.value_labels['vpip'].setText(f'{PLAYER_STATS["vpip"] * 100}%')
+        self.value_labels['pfr'].setText(f'{PLAYER_STATS["pfr"] * 100}%')
+        self.value_labels['af'].setText(str(PLAYER_STATS['af']))
+        self.value_labels['bb/100'].setText(str(PLAYER_STATS['bb/100']))
+        self.value_labels['dollar_per_100_hands'].setText(f"${self.calculate_dollar_per_100_hands()}")
+        self.value_labels['cprofit'].setText(f"${PLAYER_STATS['cprofit']}" if PLAYER_STATS['cprofit'] >= 0 else f"-${abs(PLAYER_STATS['cprofit'])}")
+        self.value_labels['best_hand'].setText(PLAYER_STATS['best_hand'])
+
 class HandHist(QWidget):
     def __init__(self):
         super().__init__()
-        update_config_data()
-        update_hand_details()
         self.init()
 
     def init(self):
         layout = QVBoxLayout()
-        table = QTableWidget()
+        self.table = QTableWidget()
 
-        table.setRowCount(len(HANDS))
-        table.setColumnCount(6) # Date, hole cards, community cards, win, profit, position
-        table.setHorizontalHeaderLabels(["Date", "Hole Cards", "Community Cards", "Win?", "Profit", "Position"])
+        self.table.setRowCount(len(HANDS))
+        self.table.setColumnCount(6) # Date, hole cards, community cards, win, profit, position
+        self.table.setHorizontalHeaderLabels(["Date", "Hole Cards", "Community Cards", "Win?", "Profit", "Position"])
+
+        self.numHands = len(HANDS)
 
         for i, hand in enumerate(get_sorted_hands(HANDS)):
             date = QTableWidgetItem(format_date_string(str(hand.date)))
@@ -273,26 +350,48 @@ class HandHist(QWidget):
             profit = QLabel(profit_str)
             position = QTableWidgetItem(hand.position)
 
-            table.setItem(i, 0, date)
-            table.setCellWidget(i, 1, hole)
-            table.setCellWidget(i, 2, community)
-            table.setItem(i, 3, win)
-            table.setCellWidget(i, 4, profit)
-            table.setItem(i, 5, position)
+            self.table.setItem(i, 0, date)
+            self.table.setCellWidget(i, 1, hole)
+            self.table.setCellWidget(i, 2, community)
+            self.table.setItem(i, 3, win)
+            self.table.setCellWidget(i, 4, profit)
+            self.table.setItem(i, 5, position)
 
-        header = table.horizontalHeader()
+        header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        table.setSortingEnabled(True)
-        table.setAlternatingRowColors(True)
-        table.setShowGrid(False)
+        self.table.setSortingEnabled(True)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
 
-        layout.addWidget(table)
+        layout.addWidget(self.table)
         self.setLayout(layout)
 
     def get_card_label(self, card_str):
         card_str = card_str.replace("♦", "<span style=\"color: red\">♦</span>")
         card_str = card_str.replace("♥", "<span style=\"color: red\">♥</span>")
         return QLabel(f'<p>{card_str}</p>')
+    
+    def updateData(self):
+        if self.numHands != len(HANDS):
+            self.numHands = len(HANDS)
+            self.table.clear()
+            self.table.setRowCount(len(HANDS))
+            for i, hand in enumerate(get_sorted_hands(HANDS)):
+                date = QTableWidgetItem(format_date_string(str(hand.date)))
+                hole = self.get_card_label(format_card_string(hand.hand))
+                community = self.get_card_label(format_card_string(hand.community))
+                win = QTableWidgetItem("Yes" if hand.won else "No")
+                profit_str = format_profit_value(hand.profit)
+                profit_str = f'<p style="color: red">{profit_str}</p>' if hand.profit < 0 else f'<p style="color: green">{profit_str}</p>' if hand.profit > 0 else profit_str
+                profit = QLabel(profit_str)
+                position = QTableWidgetItem(hand.position)
+
+                self.table.setItem(i, 0, date)
+                self.table.setCellWidget(i, 1, hole)
+                self.table.setCellWidget(i, 2, community)
+                self.table.setItem(i, 3, win)
+                self.table.setCellWidget(i, 4, profit)
+                self.table.setItem(i, 5, position)
 
 def isConfigValid():
     try:
@@ -312,12 +411,5 @@ if __name__ == '__main__':
     app = QApplication(sys.argv)
     app.setWindowIcon(QtGui.QIcon('resources/logo.png'))
     main = Main()
-    if not isConfigValid():
-        configWindow = Config()
-        configWindow.configurationCompleted.connect(main.updateAndShow)
-        configWindow.show()
-    else:
-        main_window = Main()
-        main_window.updateAndShow()
-    
+    main.customShow()
     sys.exit(app.exec())

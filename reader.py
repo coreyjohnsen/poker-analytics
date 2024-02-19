@@ -58,6 +58,9 @@ def get_player_stats(hands):
         "pfr": 0.
     }
 
+    if len(hands) == 0:
+        return stats
+
     # basic stats
     stats["vpip"] = round(mean([hand.vpip for hand in hands]), 2)
     stats["pfr"] = round(1-mean([hand.pfr for hand in hands]), 2)
