@@ -1,0 +1,21 @@
+{
+    "handSplit": "\\n\\s*\\n",
+    "win": ".* won \\$(\\d+\\.\\d+)",
+    "blind": "posts the (small|big) blind \\$(\\d+\\.\\d+)",
+    "call": "calls \\$(\\d+\\.\\d+)",
+    "bet": "bets \\$(\\d+\\.\\d+)",
+    "raise": "raises \\$(\\d+\\.\\d+) to \\$(\\d+\\.\\d+)",
+    "betReturned": "Uncalled bet \\(\\$(\\d+\\.\\d+)\\) returned to",
+    "header": "Hand #(\\d+) .* (\\$\\d+\\.\\d+\\/\\$\\d+\\.\\d+) - (\\d{4}\\/\\d{2}\\/\\d{2} \\d{2}:\\d{2}:\\d{2} UTC)",
+    "button": "Seat #(\\d) is the button",
+    "position": "Seat (\\d):",
+    "hand": {
+        "beforeUser": "Dealt to",
+        "afterUser": "\\[(([1-9TJQKA])([cshd]) ([1-9TJQKA])([cshd]))\\]"
+    },
+    "fold": "folds",
+    "dead": "posts dead \\$(\\d+\\.\\d+)",
+    "fold_preflop": "(.*)?folded on the Pre-Flop",
+    "uncalledBet": "Uncalled bet \\(\\$(\\d+\\.\\d+)\\) returned to",
+    "community": "Board \\[(.*)\\]"
+}
